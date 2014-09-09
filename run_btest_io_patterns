@@ -1,0 +1,171 @@
+#!/bin/bash
+
+# usage
+usage() { echo  "Usage: $0
+         -n : test name
+         -t : test time (seconds)
+         -d : device>
+        [-s : # times to cover device's capacity in order to reach a stable state (0)]
+        [-w : # workers (1)]
+        [-b : block size in bytes (4K)]
+        [-h : hammer size in bytes (20M)]
+        [-u : utility seconds for a single test (0)]
+        [-o : partial test, R = test random only || S = test sequencial only || H = test hammer only (full test)]
+        [-p : percentage of read iops out of total iops (0)]" 1>&2; exit 1; }
+
+# process the arguments
+while getopts ":n:t:w:b:h:u:d:s:p:o:" g; do
+    case "${g}" in
+    n) n=${OPTARG};;
+    t) t=${OPTARG};;
+    w) w=${OPTARG};;
+    b) b=${OPTARG};;
+    u) u=${OPTARG};;
+    h) h=${OPTARG};;
+    d) d=${OPTARG};;
+    s) s=${OPTARG};;
+    p) p=${OPTARG};;
+    o) o=${OPTARG};;
+    *) usage;;
+    esac
+done
+shift $((OPTIND-1))
+
+# check for missinge mandatory args
+if [ ! -b $d ]; then
+    echo "$d is not a legal device" 1>&2
+    usage
+fi
+
+if  [ -z "${n}" ] || [ -z "${t}" ] || [ -z "${d}" ]; then
+    usage
+fi
+
+
+# default args
+if [ -z ${b} ]; then
+	b=4k
+fi
+
+if [ -z ${w} ]; then
+	w=1
+fi
+
+if [ -z ${u} ]; then
+	u=0
+fi
+
+if [ -z ${h} ]; then
+	h=20M
+fi
+
+if [ -z ${s} ]; then
+	s=0
+fi
+
+if [ -z ${p} ]; then
+	p=W
+fi
+
+if [ -z ${o} ]; then
+	rand_only=false
+	sequencial_only=false
+	hammer_only=false
+fi
+
+# create relevant directories (if not existed)
+for dir in results graphs; do
+	if [ ! -d $dir ]; then
+		mkdir $dir
+	fi
+done
+
+# calc number of io operations to stable state
+calc_ops_to_stbl() {
+	size=$(blockdev --getsize64 ${d})
+	bytesize=$(sed -e 's/k/*1000/g' <<< $b)
+	bytesize=$((bytesize))
+        ops=$(($(($size/$bytesize))*$s))
+	echo "#Ops to stable-state - $ops"
+}
+
+# stabilize device using random writes
+stabilize() {
+	if [ $ops != 0 ]; then
+		./btest -n $ops -r 120 --csv results/${n}_stblize -DD -T$w -B $timeout_ms -b $b R W $d
+	fi
+}
+
+# generate hammer test
+hammer() {
+	./btest -u $u -t $t -l $h --csv results/${n}_hammer$1 -DD -T$w -B $timeout_ms -b $b R $p $d
+}
+
+# generate random test
+rand() {
+	./btest -u $u -t $t --csv results/${n}_rand$1 -DD -T$w -B $timeout_ms -b $b R $p $d
+}
+
+# generate sequencial test
+seq() {
+	./btest -u $u -t $t --csv results/${n}_seq$1 -DD -T$w -B $timeout_ms -b $b S $p $d
+}
+
+
+calc_ops_to_stbl
+
+# append test info to a local 'log' file
+params_str="stablize=$ops ops, time=$t(seconds), utility=$u(seconds), #workers=$w, block size=$b hammer size=$h, device=$d"
+echo "test=$n: $params_str" >> log
+echo "generating btest: name= $n arguments: $params_str"
+
+# run tests using btest
+
+stabilize
+
+if [ "$o" = R ] ; then
+	rand_only=true
+elif [ "$o" = S ] ; then
+	sequencial_only=true
+elif [ "$o" = H ] ; then
+	hammer_only=true
+fi
+
+timeout_ms=99999
+
+if [ "$rand_only" = true ] ; then
+        echo "Random pattern test is starting"
+        rand 1
+        rand 2
+        rand 3
+        echo "Random pattern test ended"
+
+elif [ "$sequencial_only" = true ] ; then
+        echo "Sequencial pattern test is starting"
+        seq 1
+        seq 2
+        seq 3
+        echo "Sequenctial pattern test ended"
+
+elif [ "$hammer_only" = true ] ; then
+        echo "Hammer pattern test started"
+        hammer 1
+        hammer 2
+        hammer 3
+        echo "Hammer pattern test ended"
+
+else
+	echo "Testing: random, sequencial and hammer patterns"
+	hammer 1
+	seq 1
+	rand 1
+	rand 2
+	hammer 2
+	seq 2
+	seq 3
+	rand 3
+	hammer 3
+    echo "Generating comparision graphs"
+	./compare_io_patterns.plot -n $n -d results
+    echo "Test ended"
+fi
